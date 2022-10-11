@@ -13,15 +13,17 @@ import TelegramStringFormatting
 public class ItemListCallListItem: ListViewItem, ItemListItem {
     let presentationData: ItemListPresentationData
     let dateTimeFormat: PresentationDateTimeFormat
+    let currentDateTimestamp: Int32?
     let messages: [Message]
     public let sectionId: ItemListSectionId
     let style: ItemListStyle
     let displayDecorations: Bool
     
-    public init(presentationData: ItemListPresentationData, dateTimeFormat: PresentationDateTimeFormat, messages: [Message], sectionId: ItemListSectionId, style: ItemListStyle, displayDecorations: Bool = true) {
+    public init(presentationData: ItemListPresentationData, dateTimeFormat: PresentationDateTimeFormat, messages: [Message], currentDateTimestamp: Int32?, sectionId: ItemListSectionId, style: ItemListStyle, displayDecorations: Bool = true) {
         self.presentationData = presentationData
         self.dateTimeFormat = dateTimeFormat
         self.messages = messages
+        self.currentDateTimestamp = currentDateTimestamp
         self.sectionId = sectionId
         self.style = style
         self.displayDecorations = displayDecorations
@@ -168,34 +170,36 @@ public class ItemListCallListItemNode: ListViewItemNode {
         let currentItem = self.item
         
         return { [weak self] item, params, neighbors in
-            if let strongSelf = self, strongSelf.callNodes.count != item.messages.count {
-                for pair in strongSelf.callNodes {
+
+            guard let self = self else { return (ListViewItemNodeLayout(), {}) }
+            
+            if self.callNodes.count != item.messages.count {
+                for pair in self.callNodes {
                     pair.0.removeFromSupernode()
                     pair.1.removeFromSupernode()
                 }
                 
-                strongSelf.callNodes = []
+                self.callNodes = []
                 
                 for _ in item.messages {
                     let timeNode = TextNode()
                     timeNode.isUserInteractionEnabled = false
-                    strongSelf.addSubnode(timeNode)
+                    self.addSubnode(timeNode)
                     
                     let typeNode = TextNode()
                     typeNode.isUserInteractionEnabled = false
-                    strongSelf.addSubnode(typeNode)
+                    self.addSubnode(typeNode)
                     
-                    strongSelf.callNodes.append((timeNode, typeNode))
+                    self.callNodes.append((timeNode, typeNode))
                 }
             }
             
             var makeNodesLayout: [((TextNodeLayoutArguments) -> (TextNodeLayout, () -> TextNode), (TextNodeLayoutArguments) -> (TextNodeLayout, () -> TextNode))] = []
-            if let strongSelf = self {
-                for nodes in strongSelf.callNodes {
-                    let makeTimeLayout = TextNode.asyncLayout(nodes.0)
-                    let makeTypeLayout = TextNode.asyncLayout(nodes.1)
-                    makeNodesLayout.append((makeTimeLayout, makeTypeLayout))
-                }
+
+            for nodes in self.callNodes {
+                let makeTimeLayout = TextNode.asyncLayout(nodes.0)
+                let makeTypeLayout = TextNode.asyncLayout(nodes.1)
+                makeNodesLayout.append((makeTimeLayout, makeTypeLayout))
             }
     
             var updatedTheme: PresentationTheme?
@@ -231,13 +235,13 @@ public class ItemListCallListItemNode: ListViewItemNode {
             if !item.displayDecorations {
                 insets = UIEdgeInsets()
             }
+
+            let titleText = self.makeTitleForMessageDate(fromItem: item)
             
-            let earliestMessage = item.messages.sorted(by: {$0.timestamp < $1.timestamp}).first!
-            let titleText = stringForDate(timestamp: earliestMessage.timestamp, strings: item.presentationData.strings)
             let (titleLayout, titleApply) = makeTitleLayout(TextNodeLayoutArguments(attributedString: NSAttributedString(string: titleText, font: titleFont, textColor: item.presentationData.theme.list.itemPrimaryTextColor), backgroundColor: nil, maximumNumberOfLines: 1, truncationType: .end, constrainedSize: CGSize(width: params.width - params.rightInset - 20.0 - leftInset, height: CGFloat.greatestFiniteMagnitude), alignment: .natural, cutout: nil, insets: UIEdgeInsets()))
             
             contentHeight += titleLayout.size.height + 18.0
-            
+
             var index = 0
             var nodesLayout: [(TextNodeLayout, TextNodeLayout)] = []
             var nodesApply: [(() -> TextNode, () -> TextNode)] = []
@@ -352,6 +356,25 @@ public class ItemListCallListItemNode: ListViewItemNode {
     
     override public func animateRemoved(_ currentTimestamp: Double, duration: Double) {
         self.layer.animateAlpha(from: 1.0, to: 0.0, duration: 0.15, removeOnCompletion: false)
+    }
+    
+    /**
+     Build and returns string for display information about call date
+     */
+    private func makeTitleForMessageDate(fromItem item: ItemListCallListItem) -> String {
+        // First: check timestamp from server. If its not nil - early return with formatted value of timestamp
+        if let currentTimestamp = item.currentDateTimestamp {
+            return stringForDate(timestamp: currentTimestamp, strings: item.presentationData.strings)
+        }
+
+        // Second: If timestamp from server if nil - check last message (old logic).
+        // If its not nil - early return with formatted value of earliest message timestamp
+        if let earliestMessage = item.messages.sorted(by: { $0.timestamp < $1.timestamp }).first {
+            return stringForDate(timestamp: earliestMessage.timestamp, strings: item.presentationData.strings)
+        }
+
+        // Third: If both upper cases are nil - return empty string.
+        return ""
     }
 }
 

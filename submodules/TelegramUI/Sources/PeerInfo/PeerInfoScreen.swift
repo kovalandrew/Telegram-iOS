@@ -76,6 +76,7 @@ import EntityKeyboard
 import AvatarNode
 import ComponentFlow
 import EmojiStatusComponent
+import DateApiFetcher
 
 protocol PeerInfoScreenItem: AnyObject {
     var id: AnyHashable { get }
@@ -911,7 +912,7 @@ private func settingsEditingItems(data: PeerInfoScreenData?, state: PeerInfoStat
     return result
 }
 
-private func infoItems(data: PeerInfoScreenData?, context: AccountContext, presentationData: PresentationData, interaction: PeerInfoInteraction, nearbyPeerDistance: Int32?, reactionSourceMessageId: MessageId?, callMessages: [Message]) -> [(AnyHashable, [PeerInfoScreenItem])] {
+private func infoItems(data: PeerInfoScreenData?, context: AccountContext, presentationData: PresentationData, interaction: PeerInfoInteraction, nearbyPeerDistance: Int32?, reactionSourceMessageId: MessageId?, callMessages: [Message], currentDateTimestamp: Int32?) -> [(AnyHashable, [PeerInfoScreenItem])] {
     guard let data = data else {
         return []
     }
@@ -937,7 +938,13 @@ private func infoItems(data: PeerInfoScreenData?, context: AccountContext, prese
     
     if let user = data.peer as? TelegramUser {
         if !callMessages.isEmpty {
-            items[.calls]!.append(PeerInfoScreenCallListItem(id: 20, messages: callMessages))
+            items[.calls]!.append(
+                PeerInfoScreenCallListItem(
+                    id: 20,
+                    messages: callMessages,
+                    currentDateTimestamp: currentDateTimestamp
+                )
+            )
         }
         
         if let phone = user.phone {
@@ -1690,7 +1697,10 @@ final class PeerInfoScreenNode: ViewControllerTracingNode, UIScrollViewDelegate 
     private let isOpenedFromChat: Bool
     private let videoCallsEnabled: Bool
     private let callMessages: [Message]
-    
+
+    private var currentDateTimestamp: Int32?
+    fileprivate var currentDateTimestampDisposable: Disposable?
+
     let isSettings: Bool
     private let isMediaOnly: Bool
     
@@ -3286,7 +3296,8 @@ final class PeerInfoScreenNode: ViewControllerTracingNode, UIScrollViewDelegate 
         self.shareStatusDisposable?.dispose()
         self.customStatusDisposable?.dispose()
         self.refreshMessageTagStatsDisposable?.dispose()
-        
+        self.currentDateTimestampDisposable?.dispose()
+
         self.copyProtectionTooltipController?.dismiss()
     }
     
@@ -3719,7 +3730,18 @@ final class PeerInfoScreenNode: ViewControllerTracingNode, UIScrollViewDelegate 
             }
         }))
     }
-    
+
+    fileprivate func updateTimestamp(_ timestamp: Int32?) {
+        self.currentDateTimestamp = timestamp
+        if let (layout, navigationHeight) = self.validLayout {
+            self.containerLayoutUpdated(
+                layout: layout,
+                navigationHeight: navigationHeight,
+                transition: .immediate
+            )
+        }
+    }
+
     private func openHashtag(_ hashtag: String, peerName: String?) {
         if self.resolvePeerByNameDisposable == nil {
             self.resolvePeerByNameDisposable = MetaDisposable()
@@ -7535,8 +7557,25 @@ final class PeerInfoScreenNode: ViewControllerTracingNode, UIScrollViewDelegate 
             insets.left += sectionInset
             insets.right += sectionInset
             
-            let items = self.isSettings ? settingsItems(data: self.data, context: self.context, presentationData: self.presentationData, interaction: self.interaction, isExpanded: self.headerNode.isAvatarExpanded) : infoItems(data: self.data, context: self.context, presentationData: self.presentationData, interaction: self.interaction, nearbyPeerDistance: self.nearbyPeerDistance, reactionSourceMessageId: self.reactionSourceMessageId, callMessages: self.callMessages)
-            
+            let items = self.isSettings ?
+            settingsItems(
+                data: self.data,
+                context: self.context,
+                presentationData: self.presentationData,
+                interaction: self.interaction,
+                isExpanded: self.headerNode.isAvatarExpanded
+            ) :
+            infoItems(
+                data: self.data,
+                context: self.context,
+                presentationData: self.presentationData,
+                interaction: self.interaction,
+                nearbyPeerDistance: self.nearbyPeerDistance,
+                reactionSourceMessageId: self.reactionSourceMessageId,
+                callMessages: self.callMessages,
+                currentDateTimestamp: currentDateTimestamp
+            )
+
             contentHeight += headerHeight
             if !(self.isSettings && self.state.isEditing) {
                 contentHeight += sectionSpacing
@@ -8159,6 +8198,7 @@ public final class PeerInfoScreenImpl: ViewController, PeerInfoScreen, KeyShortc
     fileprivate var presentationData: PresentationData
     private var presentationDataDisposable: Disposable?
     private let cachedDataPromise = Promise<CachedPeerData?>()
+    private let currentDateFetcher: CurrentDateTimestampApiFetcher
     
     private let accountsAndPeers = Promise<((AccountContext, EnginePeer)?, [(AccountContext, EnginePeer, Int32)])>()
     private var accountsAndPeersValue: ((AccountContext, EnginePeer)?, [(AccountContext, EnginePeer, Int32)])?
@@ -8201,6 +8241,7 @@ public final class PeerInfoScreenImpl: ViewController, PeerInfoScreen, KeyShortc
         self.isSettings = isSettings
         self.hintGroupInCommon = hintGroupInCommon
         self.requestsContext = requestsContext
+        self.currentDateFetcher = CurrentDateTimestampApiFetcher()
         
         self.presentationData = updatedPresentationData?.0 ?? context.sharedContext.currentPresentationData.with { $0 }
         
@@ -8484,11 +8525,19 @@ public final class PeerInfoScreenImpl: ViewController, PeerInfoScreen, KeyShortc
     
     override public func loadDisplayNode() {
         self.displayNode = PeerInfoScreenNode(controller: self, context: self.context, peerId: self.peerId, avatarInitiallyExpanded: self.avatarInitiallyExpanded, isOpenedFromChat: self.isOpenedFromChat, nearbyPeerDistance: self.nearbyPeerDistance, reactionSourceMessageId: self.reactionSourceMessageId, callMessages: self.callMessages, isSettings: self.isSettings, hintGroupInCommon: self.hintGroupInCommon, requestsContext: requestsContext)
+        
+        if !isSettings {
+            self.controllerNode.currentDateTimestampDisposable = (
+                self.currentDateFetcher.getCurrentDateTimestamp() |> deliverOnMainQueue
+            ).start(next: { [weak self] timestamp in
+                self?.controllerNode.updateTimestamp(timestamp)
+            })
+        }
+
         self.controllerNode.accountsAndPeers.set(self.accountsAndPeers.get() |> map { $0.1 })
         self.controllerNode.activeSessionsContextAndCount.set(self.activeSessionsContextAndCount.get())
         self.cachedDataPromise.set(self.controllerNode.cachedDataPromise.get())
         self._ready.set(self.controllerNode.ready.get())
-        
         super.displayNodeDidLoad()
     }
     
